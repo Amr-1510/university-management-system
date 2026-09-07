@@ -1,14 +1,18 @@
+import os
 from customtkinter import *
 from tkinter import ttk, messagebox
 from PIL import Image
 import mysql.connector
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # -------------------- DB CONFIG --------------------
 DB_CONFIG = {
-    "host": "localhost",
-    "user": "root",
-    "password": "123456@Amory",
-    "database": "university_db"
+    "host": os.getenv("DB_HOST", "localhost"),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD"),
+    "database": os.getenv("DB_NAME", "university_db")
 }
 
 def connect_db():
@@ -94,15 +98,19 @@ def insert_dynamic(table_name, fields, values_map, auto_pk=False):
         cur.close()
         conn.close()
 
-def update_record(table_name, fields, values_map):
-    pk = fields[0]
-    pk_val = values_map.get(pk, "").strip()
-    if not pk_val:
-        messagebox.showwarning("Missing PK", f"Please provide/select {pk}.")
+# ---- CHANGED: accepts pk_fields (list) instead of using fields[0] ----
+def update_record(table_name, fields, values_map, pk_fields):
+    pk_vals = [values_map.get(pk, "").strip() for pk in pk_fields]
+    if any(not v for v in pk_vals):
+        messagebox.showwarning("Missing PK", f"Please provide/select {', '.join(pk_fields)}.")
         return False
-    set_clause = ", ".join([f"{f}=%s" for f in fields[1:]])
-    vals = [values_map.get(f, "").strip() or None for f in fields[1:]] + [pk_val]
-    sql = f"UPDATE {table_name} SET {set_clause} WHERE {pk}=%s"
+
+    non_pk_fields = [f for f in fields if f not in pk_fields]
+    set_clause = ", ".join([f"{f}=%s" for f in non_pk_fields])
+    vals = [values_map.get(f, "").strip() or None for f in non_pk_fields] + pk_vals
+    where_clause = " AND ".join([f"{pk}=%s" for pk in pk_fields])
+    sql = f"UPDATE {table_name} SET {set_clause} WHERE {where_clause}"
+
     conn = connect_db()
     if conn is None:
         return False
@@ -118,13 +126,15 @@ def update_record(table_name, fields, values_map):
         cur.close()
         conn.close()
 
-def delete_by_pk(table_name, pk_field, pk_value):
+# ---- CHANGED: accepts pk_fields (list) + pk_values (list) instead of one field/value ----
+def delete_by_pk(table_name, pk_fields, pk_values):
+    where_clause = " AND ".join([f"{pk}=%s" for pk in pk_fields])
     conn = connect_db()
     if conn is None:
         return False
     cur = conn.cursor()
     try:
-        cur.execute(f"DELETE FROM {table_name} WHERE {pk_field}=%s", (pk_value,))
+        cur.execute(f"DELETE FROM {table_name} WHERE {where_clause}", tuple(pk_values))
         conn.commit()
         return True
     except mysql.connector.Error as e:
@@ -152,35 +162,46 @@ def show_main_menu():
          ["S_ID","Dep_ID","Fname","Lname","Email","std_level"],
          {"mandatory":["Dep_ID","Fname","Lname"], 
           "combobox":{"Dep_ID":"Department","std_level":["1","2","3","4"]}, 
+          "pk": ["S_ID"],
           "auto_pk": True}),
 
         ("Manage Courses", "Courses", "Course",
          ["C_ID","Cname","Credits","Dep_ID"],
          {"mandatory":["C_ID","Cname","Credits","Dep_ID"], 
           "combobox":{"Credits":["0","1","2","3"], "Dep_ID":"Department"}, 
+          "pk": ["C_ID"],
           "auto_pk": False}),
 
         ("Manage Instructors", "Instructors", "Instructor",
          ["I_ID","Dep_ID","Iname","Email","Salary"], 
-         {"mandatory":["Iname"], "combobox":{"Dep_ID":"Department"}, "auto_pk": True}),
+         {"mandatory":["Iname"], "combobox":{"Dep_ID":"Department"},
+          "pk": ["I_ID"],
+          "auto_pk": True}),
 
         ("Manage Departments", "Departments", "Department",
          ["Dep_ID","Dname","Room","Floor"],
-         {"mandatory":["Dep_ID"], "combobox":{}, "auto_pk": False}),
+         {"mandatory":["Dep_ID"], "combobox":{},
+          "pk": ["Dep_ID"],
+          "auto_pk": False}),
 
         ("Manage Sections", "Sections", "Section",
          ["Sec_ID","C_ID","Sec_name","Hall","I_ID"],
-         {"mandatory":["Sec_ID","C_ID"], "combobox":{"C_ID":"Course","I_ID":"Instructor"}, "auto_pk": False}),
+         {"mandatory":["Sec_ID","C_ID"], "combobox":{"C_ID":"Course","I_ID":"Instructor"},
+          "pk": ["Sec_ID", "C_ID"],
+          "auto_pk": False}),
 
         ("Manage Student Phones", "Student Phones", "Student_Phone",
          ["Phone_number","S_ID"],
-         {"mandatory":["Phone_number","S_ID"], "combobox":{"S_ID":"Student"}, "auto_pk": False}),
+         {"mandatory":["Phone_number","S_ID"], "combobox":{"S_ID":"Student"},
+          "pk": ["S_ID", "Phone_number"],
+          "auto_pk": False}),
 
         ("Manage Enrollments", "Enrollments", "Enrollment",
          ["S_ID","Sec_ID","C_ID","grade"],
          {"mandatory":["S_ID","C_ID"], 
           "combobox":{"S_ID":"Student","C_ID":"Course","grade":["A+","A","A-","B+","B","B-","C+","C","C-","D+","D","D-","F"]},
           "composite_fk": {"Sec_ID": ("Section", ["Sec_ID", "C_ID"], "C_ID")},
+          "pk": ["S_ID", "Sec_ID", "C_ID"],
           "auto_pk": False})
     ]
 
@@ -213,7 +234,7 @@ def open_manage_screen(display_name, table_name, fields, cfg):
     CTkButton(manage_frame, text="Update Record", width=260,
               command=lambda: show_update_panel(display_name, table_name, fields, cfg)).pack(pady=6)
     CTkButton(manage_frame, text="Delete Selected", width=260,
-              command=lambda: delete_selected_row(table_name, fields)).pack(pady=6)
+              command=lambda: delete_selected_row(table_name, fields, cfg)).pack(pady=6)
 
     refresh_table(table_name, fields)
 
@@ -458,7 +479,8 @@ def show_update_panel(display_name, table_name, fields, cfg):
                     messagebox.showerror("Invalid", f"Section {fk_val} does not exist for Course {dep_val}")
                     return
         
-        ok = update_record(table_name, fields, values_map)
+        # ---- CHANGED: pass composite pk field list from cfg ----
+        ok = update_record(table_name, fields, values_map, cfg.get("pk", [fields[0]]))
         if ok:
             messagebox.showinfo("Updated", "Record updated successfully.")
             refresh_table(table_name, fields)
@@ -503,7 +525,8 @@ def fill_update_fields_from_selection():
     fill_form_with_values(selected, current_fields)
 
 # -------------------- Delete Selected --------------------
-def delete_selected_row(table_name, fields):
+# ---- CHANGED: now takes cfg to get composite pk fields, matches values by column position ----
+def delete_selected_row(table_name, fields, cfg):
     tree = getattr(window, "current_tree", None)
     if tree is None:
         messagebox.showwarning("No table", "No table available.")
@@ -513,10 +536,10 @@ def delete_selected_row(table_name, fields):
         messagebox.showwarning("No selection", "Please select a row to delete.")
         return
     vals = tree.item(sel, "values")
-    pk_field = fields[0]
-    pk_val = vals[0]
-    if messagebox.askyesno("Confirm Delete", f"Delete record {pk_val}?"):
-        ok = delete_by_pk(table_name, pk_field, pk_val)
+    pk_fields = cfg.get("pk", [fields[0]])
+    pk_values = [vals[fields.index(pk)] for pk in pk_fields]
+    if messagebox.askyesno("Confirm Delete", f"Delete record {dict(zip(pk_fields, pk_values))}?"):
+        ok = delete_by_pk(table_name, pk_fields, pk_values)
         if ok:
             messagebox.showinfo("Deleted", "Record deleted.")
             refresh_table(table_name, fields)
