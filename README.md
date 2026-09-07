@@ -1,6 +1,7 @@
+```markdown
 # University Management System
 
-A full-stack university database project combining a relational MySQL database with a desktop GUI application. The SQL schema defines and populates the entire university data model, and the GUI provides a complete CRUD interface on top of it — no SQL knowledge required to operate the system.
+A full-stack university database project combining a relational MySQL database with **two interfaces on top of it**: a desktop GUI application and a REST API. The SQL schema defines and populates the entire university data model; the GUI and the API both provide full CRUD access to it independently.
 
 ---
 
@@ -10,6 +11,9 @@ A full-stack university database project combining a relational MySQL database w
 |---|---|
 | `university_db.sql` | Creates the database, all tables, constraints, triggers, and inserts sample data |
 | `GUI_DB.py` | Desktop GUI app that connects to the database and provides full CRUD management |
+| `main.py` | FastAPI REST API exposing the same database operations over HTTP |
+| `database.py` | Shared DB connection helper used by the API (reads credentials from `.env`) |
+| `requirements.txt` | Python dependencies for the API |
 
 ---
 
@@ -111,6 +115,8 @@ Fires **BEFORE INSERT** on `Enrollment`. Calculates the student's current regist
 Fires **BEFORE INSERT** on `Enrollment`. Counts active enrollments in the target section. If the section already has **5 students**, the insert is blocked with:
 > `Section is full. Maximum 5 students allowed.`
 
+Both triggers fire regardless of which interface (GUI or API) performs the insert, since they live at the database layer.
+
 ---
 
 ### Key Queries Included
@@ -149,20 +155,20 @@ The file includes intentional bad inserts to verify all constraints work correct
 
 ### Overview
 
-A 1000×750 desktop window built with **CustomTkinter**. Connects directly to `university_db` on localhost and provides a point-and-click interface for all 7 tables — no SQL needed.
+A 1000×750 desktop window built with **CustomTkinter**. Connects directly to `university_db` (credentials loaded from `.env`) and provides a point-and-click interface for all 7 tables — no SQL needed.
 
 ### Application Structure
 
 ```
 GUI_DB.py
 │
-├── DB Config & connect_db()            # MySQL connection handler
+├── DB Config & connect_db()            # MySQL connection handler (reads .env)
 │
 ├── CRUD Helpers
 │   ├── sql_fetch_list()                # Generic SELECT
 │   ├── insert_dynamic()                # Dynamic INSERT (builds SQL from field config)
-│   ├── update_record()                 # Dynamic UPDATE by primary key
-│   └── delete_by_pk()                 # DELETE by primary key
+│   ├── update_record()                 # Dynamic UPDATE, supports composite primary keys
+│   └── delete_by_pk()                  # DELETE, supports composite primary keys
 │
 ├── show_main_menu()                    # 7-button main navigation screen
 ├── open_manage_screen()                # Splits view: left panel + right data table
@@ -170,27 +176,58 @@ GUI_DB.py
 │
 ├── Form Builders
 │   ├── build_widget_for_field()        # Renders Entry or ComboBox per field type
-│   └── update_composite_fk_options()  # Filters Sec_ID dropdown based on selected C_ID
+│   └── update_composite_fk_options()   # Filters Sec_ID dropdown based on selected C_ID
 │
 ├── show_add_panel()                    # Add form with mandatory field validation
 ├── show_update_panel()                 # Update form (auto-fills from selected row)
-└── delete_selected_row()              # Delete with confirmation dialog
+└── delete_selected_row()               # Delete with confirmation dialog
 ```
 
 ### Screens
 
-| Screen | Table | Auto PK | Special Behavior |
+| Screen | Table | Primary Key | Special Behavior |
 |---|---|---|---|
-| Manage Students | `Student` | Yes (`S_ID`) | Department & level dropdowns |
-| Manage Courses | `Course` | No | Credits dropdown (0–3) |
-| Manage Instructors | `Instructor` | Yes (`I_ID`) | Department dropdown |
-| Manage Departments | `Department` | No | — |
-| Manage Sections | `Section` | No | Course dropdown; Sec_ID auto-filtered by selected Course |
-| Manage Student Phones | `Student_Phone` | No | Student dropdown |
-| Manage Enrollments | `Enrollment` | No | Student/Course/Grade dropdowns; composite FK validation |
+| Manage Students | `Student` | `S_ID` (auto) | Department & level dropdowns |
+| Manage Courses | `Course` | `C_ID` | Credits dropdown (0–3) |
+| Manage Instructors | `Instructor` | `I_ID` (auto) | Department dropdown |
+| Manage Departments | `Department` | `Dep_ID` | — |
+| Manage Sections | `Section` | `Sec_ID, C_ID` (composite) | Course dropdown; Sec_ID auto-filtered by selected Course |
+| Manage Student Phones | `Student_Phone` | `S_ID, Phone_number` (composite) | Student dropdown |
+| Manage Enrollments | `Enrollment` | `S_ID, Sec_ID, C_ID` (composite) | Student/Course/Grade dropdowns; composite FK validation |
 
 ### Composite FK Logic
 When managing **Enrollments** or **Sections**, selecting a `C_ID` (Course) dynamically updates the `Sec_ID` dropdown to show only sections that belong to that course — prevents invalid FK combinations before they hit the database.
+
+### Composite Primary Key Handling
+`update_record()` and `delete_by_pk()` operate on the full set of primary-key columns for each table (declared per-table in the `pk` config), rather than assuming a single leading column. This matters for tables like `Enrollment`, whose primary key spans three columns (`S_ID, Sec_ID, C_ID`) — updating or deleting one enrollment row correctly leaves a student's other enrollments untouched.
+
+---
+
+## REST API (`main.py`)
+
+A FastAPI service exposing the same database as a set of HTTP endpoints, independent of the GUI. Both interfaces share the same underlying tables, constraints, and triggers.
+
+### Endpoints
+
+Full CRUD (`GET` / `POST` / `PUT` or `PATCH` / `DELETE`) for:
+- `/departments`
+- `/students`
+- `/instructors`
+- `/courses`
+- `/sections`
+- `/student-phones`
+- `/enrollments`
+
+Plus `GET /health` for a basic connectivity check.
+
+Interactive documentation (Swagger UI) is auto-generated by FastAPI at `/docs`, where every endpoint can be tried directly from the browser.
+
+### Design Notes
+
+- **Validation at the request boundary** — Pydantic models mirror the database's own constraints (e.g. `grade` is restricted to the same set of letter grades as the SQL `CHECK`, phone numbers follow the same regex). Invalid requests are rejected with `422` before touching the database.
+- **Database errors surfaced as HTTP errors** — constraint violations and trigger failures (duplicate enrollment, credit-hour limit, section capacity) raise MySQL errors that are caught and returned as `400` responses with the original message, instead of crashing the server.
+- **Partial updates** — `PATCH` endpoints (e.g. `/students/{id}`, `/enrollments/{student_id}/{course_id}`) only require the fields being changed. For `Enrollment` specifically, only `grade` can be patched; the key columns (`S_ID`, `Sec_ID`, `C_ID`) are treated as identity, not as editable fields — changing them means deleting and recreating the enrollment.
+- **Credentials** — the API never hardcodes database credentials; `database.py` loads them from a local `.env` file (not committed to the repo).
 
 ---
 
@@ -203,26 +240,39 @@ source university_db.sql;
 ```
 This creates the `university_db` database, all tables, inserts sample data, and creates the triggers.
 
-### Step 2 — Configure DB Credentials
-Open `GUI_DB.py` and update:
-```python
-DB_CONFIG = {
-    "host": "localhost",
-    "user": "root",
-    "password": "YOUR_PASSWORD",   # ← change this
-    "database": "university_db"
-}
+### Step 2 — Configure Credentials
+Create a `.env` file in the project root (not committed to git):
+```
+DB_HOST=localhost
+DB_USER=root
+DB_PASSWORD=your_password_here
+DB_NAME=university_db
 ```
 
-### Step 3 — Install Python Dependencies
+### Step 3 — Install Dependencies
+
+For the GUI:
 ```bash
-pip install customtkinter mysql-connector-python Pillow
+pip install customtkinter mysql-connector-python Pillow python-dotenv
 ```
 
-### Step 4 — Run the App
+For the API:
+```bash
+pip install -r requirements.txt
+```
+
+### Step 4 — Run
+
+GUI:
 ```bash
 python GUI_DB.py
 ```
+
+API:
+```bash
+uvicorn main:app --reload
+```
+Then open `http://127.0.0.1:8000/docs` to explore and test the endpoints.
 
 ---
 
@@ -231,8 +281,20 @@ python GUI_DB.py
 - MySQL Server (running locally)
 - Python 3.8+
 
+GUI:
 ```
 customtkinter
 mysql-connector-python
 Pillow
+python-dotenv
+```
+
+API (`requirements.txt`):
+```
+fastapi
+uvicorn
+mysql-connector-python
+python-dotenv
+pydantic
+```
 ```
